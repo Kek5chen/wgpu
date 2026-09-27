@@ -1095,13 +1095,32 @@ impl crate::CommandEncoder for super::CommandEncoder {
         let bg_info = layout.bind_group_infos[group_index as usize]
             .as_ref()
             .unwrap();
+
+        // Within a bind group, each stage's resources are stored consecutively in
+        // the flat `buffers`/`textures`/`samplers` arrays, in the order the stages
+        // are iterated when the bind group is built in `Device::create_bind_group`
+        // (see `NAGA_STAGES`): vertex, fragment, compute, task, mesh. The base
+        // offset for a stage is therefore the running sum of the counts of all the
+        // stages that precede it in that order.
+        //
+        // Note that a stage's visibility bits are independent of the pipeline kind:
+        // for example a binding with `ShaderStages::all()` visibility contributes to
+        // the task/mesh counters even in a plain vertex/fragment pipeline, so these
+        // offsets must not assume that vertex and task/mesh bindings are mutually
+        // exclusive.
+        let counters = &group.counters;
+        let vs_base = super::ResourceData::default();
+        let fs_base = vs_base.add(&counters.vs);
+        let cs_base = fs_base.add(&counters.fs);
+        let ts_base = cs_base.add(&counters.cs);
+        let ms_base = ts_base.add(&counters.ts);
+
         let render_encoder = self.state.render.clone();
         let compute_encoder = self.state.compute.clone();
         if let Some(encoder) = render_encoder {
             self.update_bind_group_state(
                 Encoder::Vertex(&encoder),
-                // All zeros, as vs comes first
-                super::ResourceData::default(),
+                vs_base,
                 bg_info,
                 dynamic_offsets,
                 group_index,
@@ -1109,8 +1128,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             );
             self.update_bind_group_state(
                 Encoder::Task(&encoder),
-                // All zeros, as ts comes first
-                super::ResourceData::default(),
+                ts_base,
                 bg_info,
                 dynamic_offsets,
                 group_index,
@@ -1118,7 +1136,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             );
             self.update_bind_group_state(
                 Encoder::Mesh(&encoder),
-                group.counters.ts.clone(),
+                ms_base,
                 bg_info,
                 dynamic_offsets,
                 group_index,
@@ -1126,17 +1144,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             );
             self.update_bind_group_state(
                 Encoder::Fragment(&encoder),
-                super::ResourceData {
-                    buffers: group.counters.vs.buffers
-                        + group.counters.ts.buffers
-                        + group.counters.ms.buffers,
-                    textures: group.counters.vs.textures
-                        + group.counters.ts.textures
-                        + group.counters.ms.textures,
-                    samplers: group.counters.vs.samplers
-                        + group.counters.ts.samplers
-                        + group.counters.ms.samplers,
-                },
+                fs_base,
                 bg_info,
                 dynamic_offsets,
                 group_index,
@@ -1154,20 +1162,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         if let Some(encoder) = compute_encoder {
             self.update_bind_group_state(
                 Encoder::Compute(&encoder),
-                super::ResourceData {
-                    buffers: group.counters.vs.buffers
-                        + group.counters.ts.buffers
-                        + group.counters.ms.buffers
-                        + group.counters.fs.buffers,
-                    textures: group.counters.vs.textures
-                        + group.counters.ts.textures
-                        + group.counters.ms.textures
-                        + group.counters.fs.textures,
-                    samplers: group.counters.vs.samplers
-                        + group.counters.ts.samplers
-                        + group.counters.ms.samplers
-                        + group.counters.fs.samplers,
-                },
+                cs_base,
                 bg_info,
                 dynamic_offsets,
                 group_index,

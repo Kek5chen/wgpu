@@ -13,6 +13,7 @@ pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
         BIND_GROUP_NONFILTERING_LAYOUT_MAG_SAMPLER,
         BIND_GROUP_NONFILTERING_LAYOUT_MIPMAP_SAMPLER,
         BIND_GROUP_WITH_MAX_BINDING_INDEX,
+        BIND_GROUP_HETEROGENEOUS_VISIBILITY,
     ]);
 }
 
@@ -252,6 +253,232 @@ static BIND_GROUP_NONFILTERING_LAYOUT_MIPMAP_SAMPLER: GpuTestConfiguration =
                 false,
             );
         });
+
+/// Render using a bind group whose entries have *heterogeneous* visibility
+/// masks, and check that every binding is routed to the buffer the shader
+/// expects.
+///
+/// On the Metal backend the per-stage resources of a bind group are stored
+/// consecutively, and each stage slices into that storage using a base offset.
+/// Those base offsets used to be computed assuming a stage ordering that did
+/// not match the order in which the resources were actually laid out, so any
+/// binding whose visibility included the task/mesh bits (in particular
+/// `ShaderStages::all()`) shifted the fragment/compute slices and the shader
+/// read the wrong buffers.
+///
+/// Regression test for a bind group binding mismatch on Metal with mixed
+/// visibility masks.
+fn heterogeneous_visibility(ctx: TestingContext) {
+    use wgpu::ShaderStages as Ss;
+
+    // (visibility, value) for each contiguous uniform binding. The mix is
+    // chosen so that the number of bindings visible to each stage differs:
+    // binding 4 is not visible to the vertex stage, while the `all()` bindings
+    // contribute to the task/mesh counters even though this is a plain
+    // vertex/fragment pipeline.
+    let entries: &[(Ss, u32)] = &[
+        (Ss::all(), 10),
+        (Ss::all(), 20),
+        (Ss::all(), 30),
+        (Ss::all(), 40),
+        (Ss::FRAGMENT | Ss::COMPUTE, 50),
+        (Ss::VERTEX_FRAGMENT | Ss::COMPUTE, 60),
+    ];
+    let count = entries.len() as u32;
+
+    let mut shader = String::from("struct Data { v: vec4<u32> }\n");
+    for (i, _) in entries.iter().enumerate() {
+        shader.push_str(&format!(
+            "@group(0) @binding({i}) var<uniform> b{i}: Data;\n"
+        ));
+    }
+    shader.push_str(
+        "@vertex\n\
+         fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {\n\
+             var p = array<vec2<f32>, 3>(vec2(-1.0, -3.0), vec2(3.0, 1.0), vec2(-1.0, 1.0));\n\
+             return vec4<f32>(p[i], 0.0, 1.0);\n\
+         }\n\
+         @fragment\n\
+         fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) u32 {\n\
+             let x = u32(pos.x);\n\
+             var v = 0u;\n",
+    );
+    for (i, _) in entries.iter().enumerate() {
+        shader.push_str(&format!("    if (x == {i}u) {{ v = b{i}.v.x; }}\n"));
+    }
+    shader.push_str("    return v;\n}\n");
+
+    let bgl = ctx
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("heterogeneous visibility bgl"),
+            entries: &entries
+                .iter()
+                .enumerate()
+                .map(|(i, &(vis, _))| wgpu::BindGroupLayoutEntry {
+                    binding: i as u32,
+                    visibility: vis,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                })
+                .collect::<Vec<_>>(),
+        });
+
+    let buffers = entries
+        .iter()
+        .map(|&(_, value)| {
+            ctx.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&[value, 0, 0, 0]),
+                    usage: BufferUsages::UNIFORM,
+                })
+        })
+        .collect::<Vec<_>>();
+
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &bgl,
+        entries: &buffers
+            .iter()
+            .enumerate()
+            .map(|(i, buffer)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: buffer.as_entire_binding(),
+            })
+            .collect::<Vec<_>>(),
+    });
+
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+
+    let pipeline_layout = ctx
+        .device
+        .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+
+    let pipeline = ctx
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::TextureFormat::R32Uint.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+    let target = ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: count,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Uint,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+
+    let bytes_per_row = 256;
+    let readback = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: bytes_per_row,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row as u32),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: count,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue.submit(Some(encoder.finish()));
+
+    readback
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    ctx.device.poll(PollType::wait_indefinitely()).unwrap();
+
+    let data = readback.slice(..).get_mapped_range().unwrap();
+    let got: &[u32] = bytemuck::cast_slice(&data[..count as usize * 4]);
+    let expected = entries.iter().map(|&(_, v)| v).collect::<Vec<_>>();
+    assert_eq!(
+        got,
+        &expected[..],
+        "bind group with heterogeneous visibility routed bindings to the wrong buffers"
+    );
+}
+
+#[gpu_test]
+static BIND_GROUP_HETEROGENEOUS_VISIBILITY: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(TestParameters::default().limits(wgpu::Limits::downlevel_defaults()))
+    .run_sync(heterogeneous_visibility);
 
 #[gpu_test]
 static BIND_GROUP_WITH_MAX_BINDING_INDEX: GpuTestConfiguration = GpuTestConfiguration::new()

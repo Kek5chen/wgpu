@@ -42,6 +42,12 @@ Bottom level categories:
 
 ## Unreleased
 
+### Bug Fixes
+
+#### Metal
+
+- Fix bind groups routing bindings to the wrong buffers/textures/samplers when a bind group layout mixes entries with different `visibility` masks (for example some entries using `ShaderStages::all()` and others restricted to a subset of stages). The per-stage resource base offsets computed in `set_bind_group` did not match the stage order in which the resources are actually stored, so bindings whose visibility included the task/mesh stages shifted the fragment/compute slices. By @wgpu-contributor in [#0000](https://github.com/gfx-rs/wgpu/pull/0000).
+
 ## v30.0.0 (2026-07-01)
 
 ### Major changes

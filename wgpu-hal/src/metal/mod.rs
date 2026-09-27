@@ -939,6 +939,17 @@ struct ResourceData<T> {
     samplers: T,
 }
 
+impl ResourceData<ResourceIndex> {
+    /// Returns the field-wise sum of two resource counters.
+    fn add(&self, other: &Self) -> Self {
+        Self {
+            buffers: self.buffers + other.buffers,
+            textures: self.textures + other.textures,
+            samplers: self.samplers + other.samplers,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct MultiStageData<T> {
     vs: T,
