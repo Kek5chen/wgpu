@@ -768,11 +768,17 @@ impl crate::Device for super::Device {
         &self,
         desc: &crate::CommandEncoderDescriptor<super::Queue>,
     ) -> Result<super::CommandEncoder, crate::DeviceError> {
+        let acceleration_structure_fence = self
+            .features
+            .contains(wgt::Features::EXPERIMENTAL_RAY_QUERY)
+            .then(|| desc.queue.shared.acceleration_structure_fence())
+            .transpose()?;
         self.counters.command_encoders.add(1);
         Ok(super::CommandEncoder {
             shared: Arc::clone(&self.shared),
             queue_shared: Arc::clone(&desc.queue.shared),
             raw_cmd_buf: None,
+            acceleration_structure_fence,
             state: super::CommandState::default(),
             temp: super::Temp::default(),
             counters: Arc::clone(&self.counters),

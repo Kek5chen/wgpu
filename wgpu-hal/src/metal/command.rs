@@ -7,10 +7,10 @@ use objc2_metal::{
     MTLAccelerationStructure, MTLAccelerationStructureCommandEncoder, MTLBlitCommandEncoder,
     MTLBlitPassDescriptor, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder,
     MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLCounterDontSample,
-    MTLDevice, MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLResidencySet, MTLResidencySetDescriptor, MTLSamplerState, MTLScissorRect, MTLSize,
-    MTLStoreAction, MTLTexture, MTLVertexAmplificationViewMapping, MTLViewport,
-    MTLVisibilityResultMode,
+    MTLDevice, MTLFence, MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderStages, MTLResidencySet, MTLResidencySetDescriptor,
+    MTLSamplerState, MTLScissorRect, MTLSize, MTLStoreAction, MTLTexture,
+    MTLVertexAmplificationViewMapping, MTLViewport, MTLVisibilityResultMode,
 };
 
 use super::{
@@ -36,6 +36,7 @@ impl Default for super::CommandState {
             acceleration_structure_builder: None,
             render: None,
             compute: None,
+            shader_uses_acceleration_structure: false,
             raw_primitive_type: MTLPrimitiveType::Point,
             index: None,
             stage_infos: Default::default(),
@@ -83,6 +84,19 @@ impl Encoder<'_> {
                 Self::Task(enc) => enc.setObjectBuffer_offset_atIndex(buffer, offset, index),
                 Self::Mesh(enc) => enc.setMeshBuffer_offset_atIndex(buffer, offset, index),
                 Self::Compute(enc) => enc.setBuffer_offset_atIndex(buffer, offset, index),
+            }
+        }
+    }
+
+    fn wait_for_acceleration_structure_fence(&self, fence: &ProtocolObject<dyn MTLFence>) {
+        match self {
+            Self::Vertex(encoder) | Self::Fragment(encoder) => encoder.waitForFence_beforeStages(
+                fence,
+                MTLRenderStages::Vertex | MTLRenderStages::Fragment,
+            ),
+            Self::Compute(encoder) => encoder.waitForFence(fence),
+            Self::Task(_) | Self::Mesh(_) => {
+                unreachable!("Acceleration structures are not allowed in task or mesh shaders")
             }
         }
     }
@@ -273,8 +287,9 @@ impl super::CommandEncoder {
             );
             let cmd_buf = self.raw_cmd_buf.as_ref().unwrap();
             autoreleasepool(|_| {
-                self.state.acceleration_structure_builder =
-                    cmd_buf.accelerationStructureCommandEncoder().to_owned();
+                let encoder = cmd_buf.accelerationStructureCommandEncoder().unwrap();
+                encoder.waitForFence(self.acceleration_structure_fence.as_ref().unwrap());
+                self.state.acceleration_structure_builder = Some(encoder);
             });
         }
         self.state.acceleration_structure_builder.clone().unwrap()
@@ -282,6 +297,28 @@ impl super::CommandEncoder {
 
     pub(super) fn leave_acceleration_structure_builder(&mut self) {
         if let Some(encoder) = self.state.acceleration_structure_builder.take() {
+            encoder.updateFence(self.acceleration_structure_fence.as_ref().unwrap());
+            encoder.endEncoding();
+        }
+    }
+
+    fn leave_render(&mut self) {
+        if let Some(encoder) = self.state.render.take() {
+            if core::mem::take(&mut self.state.shader_uses_acceleration_structure) {
+                encoder.updateFence_afterStages(
+                    self.acceleration_structure_fence.as_ref().unwrap(),
+                    MTLRenderStages::Vertex | MTLRenderStages::Fragment,
+                );
+            }
+            encoder.endEncoding();
+        }
+    }
+
+    fn leave_compute(&mut self) {
+        if let Some(encoder) = self.state.compute.take() {
+            if core::mem::take(&mut self.state.shader_uses_acceleration_structure) {
+                encoder.updateFence(self.acceleration_structure_fence.as_ref().unwrap());
+            }
             encoder.endEncoding();
         }
     }
@@ -379,6 +416,12 @@ impl super::CommandEncoder {
                     }
                 }
                 super::BufferLikeResource::AccelerationStructure(ptr) => {
+                    if !self.state.shader_uses_acceleration_structure {
+                        encoder.wait_for_acceleration_structure_fence(
+                            self.acceleration_structure_fence.as_ref().unwrap(),
+                        );
+                        self.state.shader_uses_acceleration_structure = true;
+                    }
                     let buffer = Some(unsafe { ptr.as_ref() });
                     let index = (resource_indices.buffers + index) as usize;
                     encoder.set_acceleration_structure(buffer, index);
@@ -535,12 +578,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.leave_acceleration_structure_builder();
         // when discarding, we don't have a guarantee that
         // everything is in a good state, so check carefully
-        if let Some(encoder) = self.state.render.take() {
-            encoder.endEncoding();
-        }
-        if let Some(encoder) = self.state.compute.take() {
-            encoder.endEncoding();
-        }
+        self.leave_render();
+        self.leave_compute();
         self.state.pending_timer_queries.clear();
         let had_command_buffer = self.raw_cmd_buf.is_some();
         // Clear the Option first so the underlying `metal::CommandBuffer` is
@@ -1082,7 +1121,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
     }
 
     unsafe fn end_render_pass(&mut self) {
-        self.state.render.take().unwrap().endEncoding();
+        self.leave_render();
     }
 
     unsafe fn set_bind_group(
@@ -1751,7 +1790,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         });
     }
     unsafe fn end_compute_pass(&mut self) {
-        self.state.compute.take().unwrap().endEncoding();
+        self.leave_compute();
     }
 
     unsafe fn set_compute_pipeline(&mut self, pipeline: &super::ComputePipeline) {
@@ -1873,6 +1912,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         &mut self,
         _barriers: crate::AccelerationStructureBarrier,
     ) {
+        self.leave_acceleration_structure_builder();
     }
 
     unsafe fn read_acceleration_structure_compact_size(
@@ -1880,6 +1920,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         acceleration_structure: &super::AccelerationStructure,
         buffer: &super::Buffer,
     ) {
+        // Core can request the compacted size directly after a build, before
+        // its final AS barrier. The size read needs a separate consuming pass.
+        self.leave_acceleration_structure_builder();
         let command_encoder = self.enter_acceleration_structure_builder();
         command_encoder.writeCompactedAccelerationStructureSize_toBuffer_offset(
             &acceleration_structure.raw,
