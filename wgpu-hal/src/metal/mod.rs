@@ -44,11 +44,12 @@ use objc2::{
     runtime::ProtocolObject,
 };
 use objc2_foundation::ns_string;
+use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{
     MTLAccelerationStructure, MTLAccelerationStructureCommandEncoder, MTLArgumentBuffersTier,
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer, MTLCullMode,
-    MTLDepthClipMode, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLIndexType,
+    MTLDepthClipMode, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFence, MTLIndexType,
     MTLLanguageVersion, MTLLibrary, MTLPrimitiveType, MTLReadWriteTextureTier,
     MTLRenderCommandEncoder, MTLRenderPipelineState, MTLRenderStages, MTLResource,
     MTLResourceUsage, MTLSamplerState, MTLSharedEvent, MTLSize, MTLTexture, MTLTextureType,
@@ -489,6 +490,7 @@ impl Queue {
                 pending_waits: Mutex::new(Vec::new()),
                 pending_signals: Mutex::new(Vec::new()),
                 relay: OnceCell::new(),
+                acceleration_structure_fence: Mutex::new(None),
             }),
             timestamp_period,
         }
@@ -634,6 +636,39 @@ pub struct QueueShared {
     pending_waits: PendingEvents,
     pending_signals: PendingEvents,
     relay: OnceCell<Relay>,
+    acceleration_structure_fence: Mutex<Option<Retained<ProtocolObject<dyn MTLFence>>>>,
+}
+
+impl QueueShared {
+    fn acceleration_structure_fence(
+        &self,
+    ) -> Result<Retained<ProtocolObject<dyn MTLFence>>, crate::DeviceError> {
+        let mut shared_fence = self.acceleration_structure_fence.lock();
+        if let Some(fence) = shared_fence.as_ref() {
+            return Ok(fence.clone());
+        }
+        autoreleasepool(|_| {
+            let fence = self
+                .raw
+                .device()
+                .newFence()
+                .ok_or(crate::DeviceError::OutOfMemory)?;
+            let command_buffer = self
+                .raw
+                .commandBuffer()
+                .ok_or(crate::DeviceError::OutOfMemory)?;
+            let encoder = command_buffer
+                .blitCommandEncoder()
+                .ok_or(crate::DeviceError::OutOfMemory)?;
+            encoder.updateFence(&fence);
+            encoder.endEncoding();
+            // Publish only after committing an initial update. Later fence waits
+            // must not depend on an unsubmitted or discarded user command buffer.
+            command_buffer.commit();
+            *shared_fence = Some(fence.clone());
+            Ok(fence)
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -1326,6 +1361,7 @@ struct CommandState {
         Option<Retained<ProtocolObject<dyn MTLAccelerationStructureCommandEncoder>>>,
     render: Option<Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>>,
     compute: Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>,
+    shader_uses_acceleration_structure: bool,
     raw_primitive_type: MTLPrimitiveType,
     index: Option<IndexState>,
     stage_infos: MultiStageData<PipelineStageInfo>,
@@ -1368,6 +1404,9 @@ pub struct CommandEncoder {
     shared: Arc<AdapterShared>,
     queue_shared: Arc<QueueShared>,
     raw_cmd_buf: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    // Shared across encoders so Metal resolves dependencies in commit order,
+    // including independently recorded command buffers and submissions.
+    acceleration_structure_fence: Option<Retained<ProtocolObject<dyn MTLFence>>>,
     state: CommandState,
     temp: Temp,
     counters: Arc<wgt::HalCounters>,
