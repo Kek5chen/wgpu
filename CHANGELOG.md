@@ -50,6 +50,12 @@ Bottom level categories:
 
 - Fix bind groups routing bindings to the wrong buffers/textures/samplers when a bind group layout mixes entries with different `visibility` masks (for example some entries using `ShaderStages::all()` and others restricted to a subset of stages). The per-stage resource base offsets computed in `set_bind_group` did not match the stage order in which the resources are actually stored, so bindings whose visibility included the task/mesh stages shifted the fragment/compute slices. By @wgpu-contributor in [#0000](https://github.com/gfx-rs/wgpu/pull/0000).
 
+### Performance
+
+#### General
+
+- Validate a TLAS once per command buffer between builds, and keep one dependency per distinct BLAS rather than one per instance. Submitting work that binds a TLAS in many dispatches no longer costs time proportional to the number of binds times the number of instances.
+
 ## v30.0.0 (2026-07-01)
 
 ### Major changes

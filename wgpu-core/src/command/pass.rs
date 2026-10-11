@@ -165,13 +165,9 @@ pub(super) fn flush_bindings_helper(state: &mut PassState) -> Result<(), Destroy
             );
         }
 
-        let used_resource = bind_group
-            .used
-            .acceleration_structures
-            .into_iter()
-            .map(|tlas| crate::ray_tracing::AsAction::UseTlas(tlas.clone()));
-
-        state.base.as_actions.extend(used_resource);
+        for tlas in bind_group.used.acceleration_structures.into_iter() {
+            crate::ray_tracing::AsAction::record_tlas_use(state.base.as_actions, tlas);
+        }
 
         let raw_bg = bind_group.try_raw(state.base.snatch_guard)?;
         unsafe {

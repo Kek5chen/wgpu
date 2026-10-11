@@ -359,6 +359,24 @@ pub(crate) enum AsAction {
     UseTlas(Arc<Tlas>),
 }
 
+impl AsAction {
+    /// Records that a command buffer uses `tlas`, unless it already does since its last build.
+    ///
+    /// Submission validates a use against the state that the builds before it leave behind. Only a
+    /// build changes that state, so a second use between two builds would repeat the same checks
+    /// for every instance of the TLAS.
+    pub(crate) fn record_tlas_use(actions: &mut Vec<Self>, tlas: &Arc<Tlas>) {
+        let recorded = actions
+            .iter()
+            .rev()
+            .take_while(|action| !matches!(action, Self::Build(_)))
+            .any(|action| matches!(action, Self::UseTlas(used) if Arc::ptr_eq(used, tlas)));
+        if !recorded {
+            actions.push(Self::UseTlas(tlas.clone()));
+        }
+    }
+}
+
 /// Like [`BlasTriangleGeometry`], but with owned data.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", apply(serde_object_reference_struct))]

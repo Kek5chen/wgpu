@@ -24,7 +24,7 @@ use crate::{
         ArcTlasInstance, ArcTlasPackage, BlasBuildEntry, BlasGeometries,
         BuildAccelerationStructureError, OwnedBlasBuildEntry, OwnedTlasPackage, TlasPackage,
     },
-    resource::{Blas, BlasCompactState, Labeled, StagingBuffer, Tlas},
+    resource::{Blas, BlasCompactState, Labeled, StagingBuffer, Tlas, Trackable},
     scratch::ScratchBuffer,
     snatch::SnatchGuard,
 };
@@ -229,7 +229,9 @@ pub(crate) fn build_acceleration_structures(
 
         let first_byte_index = instance_buffer_staging_source.len();
 
+        // One entry per distinct BLAS: every use of the TLAS validates its dependencies again.
         let mut dependencies = Vec::new();
+        let mut distinct_blases = crate::FastHashSet::default();
 
         let mut instance_count = 0;
         for instance in package.instances.iter().flatten() {
@@ -239,7 +241,10 @@ pub(crate) fn build_acceleration_structures(
                 ));
             }
             let blas = &instance.blas;
-            state.tracker.blas_s.insert_single(blas.clone());
+            if distinct_blases.insert(blas.tracker_index()) {
+                state.tracker.blas_s.insert_single(blas.clone());
+                dependencies.push(blas.clone());
+            }
 
             instance_buffer_staging_source.extend(state.device.raw().tlas_instance_to_bytes(
                 hal::TlasInstance {
@@ -267,8 +272,6 @@ pub(crate) fn build_acceleration_structures(
             }
 
             instance_count += 1;
-
-            dependencies.push(blas.clone());
         }
 
         build_command.tlas_s_built.push(TlasBuild {
