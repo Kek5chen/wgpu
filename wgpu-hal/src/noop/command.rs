@@ -295,12 +295,6 @@ impl crate::CommandEncoder for CommandBuffer {
     ) {
     }
 
-    unsafe fn set_acceleration_structure_dependencies(
-        command_buffers: &[&CommandBuffer],
-        dependencies: &[&Resource],
-    ) {
-    }
-
     unsafe fn begin_ray_tracing_pass(&mut self, _desc: &crate::RayTracingPassDescriptor) {}
 
     unsafe fn end_ray_tracing_pass(&mut self) {}

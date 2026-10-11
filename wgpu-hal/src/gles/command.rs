@@ -1311,13 +1311,6 @@ impl crate::CommandEncoder for super::CommandEncoder {
         unimplemented!()
     }
 
-    unsafe fn set_acceleration_structure_dependencies(
-        _command_buffers: &[&super::CommandBuffer],
-        _dependencies: &[&super::AccelerationStructure],
-    ) {
-        unimplemented!()
-    }
-
     unsafe fn begin_ray_tracing_pass(&mut self, _desc: &crate::RayTracingPassDescriptor) {
         unimplemented!()
     }

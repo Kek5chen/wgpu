@@ -52,9 +52,9 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer, MTLCullMode,
     MTLDepthClipMode, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLFence, MTLIndexType,
     MTLLanguageVersion, MTLLibrary, MTLPrimitiveType, MTLReadWriteTextureTier,
-    MTLRenderCommandEncoder, MTLRenderPipelineState, MTLRenderStages, MTLResource,
-    MTLResourceUsage, MTLSamplerState, MTLSharedEvent, MTLSize, MTLTexture, MTLTextureType,
-    MTLTriangleFillMode, MTLWinding,
+    MTLRenderCommandEncoder, MTLRenderPipelineState, MTLRenderStages, MTLResidencySet,
+    MTLResidencySetDescriptor, MTLResource, MTLResourceUsage, MTLSamplerState, MTLSharedEvent,
+    MTLSize, MTLTexture, MTLTextureType, MTLTriangleFillMode, MTLWinding,
 };
 use objc2_quartz_core::CAMetalLayer;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -672,6 +672,7 @@ pub struct Device {
     features: wgt::Features,
     counters: Arc<wgt::HalCounters>,
     limits: wgt::Limits,
+    acceleration_structure_residency: Option<Arc<AccelerationStructureResidency>>,
 }
 
 #[derive(Debug)]
@@ -1404,6 +1405,7 @@ pub struct CommandEncoder {
     // Shared across encoders so Metal resolves dependencies in commit order,
     // including independently recorded command buffers and submissions.
     acceleration_structure_fence: Option<Retained<ProtocolObject<dyn MTLFence>>>,
+    acceleration_structure_residency: Option<Arc<AccelerationStructureResidency>>,
     state: CommandState,
     temp: Temp,
     counters: Arc<wgt::HalCounters>,
@@ -1450,6 +1452,58 @@ impl AccelerationStructure {
 impl crate::DynAccelerationStructure for AccelerationStructure {}
 unsafe impl Send for AccelerationStructure {}
 unsafe impl Sync for AccelerationStructure {}
+
+/// Keeps every acceleration structure of a device resident for its command buffers.
+///
+/// Instances name their bottom-level structures by ID, so Metal cannot see that a command buffer
+/// reads them. A structure joins this set when it is created and leaves it when it is destroyed,
+/// and every command buffer of a device with ray queries uses the set. Changes are committed when a
+/// command buffer finishes encoding, before it can be submitted.
+#[derive(Debug)]
+struct AccelerationStructureResidency {
+    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
+    /// Whether changes wait for a commit. The lock also serializes every change to the set.
+    uncommitted: Mutex<bool>,
+}
+
+unsafe impl Send for AccelerationStructureResidency {}
+unsafe impl Sync for AccelerationStructureResidency {}
+
+impl AccelerationStructureResidency {
+    fn new(device: &ProtocolObject<dyn MTLDevice>) -> Result<Self, crate::DeviceError> {
+        let descriptor = MTLResidencySetDescriptor::new();
+        descriptor.setLabel(Some(ns_string!("acceleration structures")));
+        let set = device
+            .newResidencySetWithDescriptor_error(&descriptor)
+            .map_err(|_| crate::DeviceError::OutOfMemory)?;
+        Ok(Self {
+            set,
+            uncommitted: Mutex::new(false),
+        })
+    }
+
+    fn add(&self, structure: &ProtocolObject<dyn MTLAccelerationStructure>) {
+        let mut uncommitted = self.uncommitted.lock();
+        self.set.addAllocation(ProtocolObject::from_ref(structure));
+        *uncommitted = true;
+    }
+
+    fn remove(&self, structure: &ProtocolObject<dyn MTLAccelerationStructure>) {
+        let mut uncommitted = self.uncommitted.lock();
+        self.set
+            .removeAllocation(ProtocolObject::from_ref(structure));
+        *uncommitted = true;
+    }
+
+    /// Commits pending changes and makes `command_buffer` use the set.
+    fn use_in(&self, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+        let mut uncommitted = self.uncommitted.lock();
+        if core::mem::take(&mut *uncommitted) {
+            self.set.commit();
+        }
+        command_buffer.useResidencySet(&self.set);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsType {

@@ -104,12 +104,19 @@ impl crate::Adapter for super::Adapter {
                 1.0
             };
 
+            let acceleration_structure_residency = features
+                .contains(wgt::Features::EXPERIMENTAL_RAY_QUERY)
+                .then(|| super::AccelerationStructureResidency::new(&self.shared.device))
+                .transpose()?
+                .map(Arc::new);
+
             Ok(crate::OpenDevice {
                 device: super::Device {
                     shared: Arc::clone(&self.shared),
                     features,
                     counters: Default::default(),
                     limits: limits.clone(),
+                    acceleration_structure_residency,
                 },
                 queue: super::Queue {
                     shared: Arc::new(QueueShared {

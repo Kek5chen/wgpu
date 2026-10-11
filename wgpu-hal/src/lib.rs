@@ -1868,10 +1868,6 @@ pub trait CommandEncoder: WasmNotSendSync + fmt::Debug {
         acceleration_structure: &<Self::A as Api>::AccelerationStructure,
         buf: &<Self::A as Api>::Buffer,
     );
-    unsafe fn set_acceleration_structure_dependencies(
-        command_buffers: &[&<Self::A as Api>::CommandBuffer],
-        dependencies: &[&<Self::A as Api>::AccelerationStructure],
-    );
 }
 
 bitflags!(

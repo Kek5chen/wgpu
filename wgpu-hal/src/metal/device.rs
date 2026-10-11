@@ -438,12 +438,20 @@ impl super::Device {
         limits: &wgt::Limits,
     ) -> super::Device {
         let capabilities_query = super::CapabilitiesQuery::new(&raw);
+        let acceleration_structure_residency = features
+            .contains(wgt::Features::EXPERIMENTAL_RAY_QUERY)
+            .then(|| {
+                super::AccelerationStructureResidency::new(&raw)
+                    .expect("failed to create the acceleration structure residency set")
+            })
+            .map(Arc::new);
         let shared = super::AdapterShared::new(raw, &capabilities_query);
         super::Device {
             shared: Arc::new(shared),
             features,
             counters: Default::default(),
             limits: limits.clone(),
+            acceleration_structure_residency,
         }
     }
 
@@ -779,6 +787,7 @@ impl crate::Device for super::Device {
             queue_shared: Arc::clone(&desc.queue.shared),
             raw_cmd_buf: None,
             acceleration_structure_fence,
+            acceleration_structure_residency: self.acceleration_structure_residency.clone(),
             state: super::CommandState::default(),
             temp: super::Temp::default(),
             counters: Arc::clone(&self.counters),
@@ -2109,21 +2118,26 @@ impl crate::Device for super::Device {
     ) -> Result<super::AccelerationStructure, crate::DeviceError> {
         // self.counters.acceleration_structures.add(1);
         autoreleasepool(|_| {
-            Ok(super::AccelerationStructure {
-                raw: self
-                    .shared
-                    .device
-                    .newAccelerationStructureWithSize(descriptor.size as usize)
-                    .ok_or(crate::DeviceError::OutOfMemory)?,
-            })
+            let raw = self
+                .shared
+                .device
+                .newAccelerationStructureWithSize(descriptor.size as usize)
+                .ok_or(crate::DeviceError::OutOfMemory)?;
+            if let Some(residency) = &self.acceleration_structure_residency {
+                residency.add(&raw);
+            }
+            Ok(super::AccelerationStructure { raw })
         })
     }
 
     unsafe fn destroy_acceleration_structure(
         &self,
-        _acceleration_structure: super::AccelerationStructure,
+        acceleration_structure: super::AccelerationStructure,
     ) {
         // self.counters.acceleration_structures.sub(1);
+        if let Some(residency) = &self.acceleration_structure_residency {
+            residency.remove(&acceleration_structure.raw);
+        }
     }
 
     fn tlas_instance_to_bytes(&self, instance: TlasInstance) -> Vec<u8> {

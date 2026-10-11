@@ -56,6 +56,10 @@ Bottom level categories:
 
 - Validate a TLAS once per command buffer between builds, and keep one dependency per distinct BLAS rather than one per instance. Submitting work that binds a TLAS in many dispatches no longer costs time proportional to the number of binds times the number of instances.
 
+#### Metal
+
+- Keep acceleration structures resident through one residency set per device that every command buffer uses, instead of building a new set from every TLAS dependency on each submission. `wgpu_hal::CommandEncoder::set_acceleration_structure_dependencies` is removed.
+
 ## v30.0.0 (2026-07-01)
 
 ### Major changes
