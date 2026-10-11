@@ -58,7 +58,7 @@ Bottom level categories:
 
 #### Metal
 
-- Keep acceleration structures resident through one residency set per device that every command buffer uses, instead of building a new set from every TLAS dependency on each submission. `wgpu_hal::CommandEncoder::set_acceleration_structure_dependencies` is removed.
+- Keep acceleration structures resident through one residency set per device, attached once to each queue the device encodes for, instead of building a new set from every TLAS dependency on each submission. `wgpu_hal::CommandEncoder::set_acceleration_structure_dependencies` is removed.
 
 ## v30.0.0 (2026-07-01)
 

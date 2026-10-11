@@ -781,6 +781,11 @@ impl crate::Device for super::Device {
             .contains(wgt::Features::EXPERIMENTAL_RAY_QUERY)
             .then(|| desc.queue.shared.acceleration_structure_fence())
             .transpose()?;
+        if let Some(residency) = &self.acceleration_structure_residency {
+            desc.queue
+                .shared
+                .use_acceleration_structure_residency(residency);
+        }
         self.counters.command_encoders.add(1);
         Ok(super::CommandEncoder {
             shared: Arc::clone(&self.shared),

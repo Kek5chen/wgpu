@@ -126,6 +126,7 @@ impl crate::Adapter for super::Adapter {
                         pending_signals: Mutex::new(Vec::new()),
                         relay: OnceLock::new(),
                         acceleration_structure_fence: Mutex::new(None),
+                        acceleration_structure_residency: OnceLock::new(),
                     }),
                     timestamp_period,
                 },

@@ -604,12 +604,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
         debug_assert!(self.state.compute.is_none());
         debug_assert!(self.state.pending_timer_queries.is_empty());
 
-        let raw = self.raw_cmd_buf.take().unwrap();
         if let Some(residency) = &self.acceleration_structure_residency {
-            residency.use_in(&raw);
+            residency.commit_pending();
         }
         Ok(super::CommandBuffer {
-            raw,
+            raw: self.raw_cmd_buf.take().unwrap(),
             queue_shared: Arc::clone(&self.queue_shared),
         })
     }

@@ -486,6 +486,7 @@ impl Queue {
                 pending_signals: Mutex::new(Vec::new()),
                 relay: OnceLock::new(),
                 acceleration_structure_fence: Mutex::new(None),
+                acceleration_structure_residency: OnceLock::new(),
             }),
             timestamp_period,
         }
@@ -632,9 +633,21 @@ pub struct QueueShared {
     pending_signals: PendingEvents,
     relay: OnceLock<Relay>,
     acceleration_structure_fence: Mutex<Option<Retained<ProtocolObject<dyn MTLFence>>>>,
+    acceleration_structure_residency: OnceLock<Arc<AccelerationStructureResidency>>,
 }
 
 impl QueueShared {
+    /// Makes the device's acceleration structures resident for every command buffer of this queue.
+    fn use_acceleration_structure_residency(
+        &self,
+        residency: &Arc<AccelerationStructureResidency>,
+    ) {
+        self.acceleration_structure_residency.get_or_init(|| {
+            self.raw.addResidencySet(&residency.set);
+            Arc::clone(residency)
+        });
+    }
+
     fn acceleration_structure_fence(
         &self,
     ) -> Result<Retained<ProtocolObject<dyn MTLFence>>, crate::DeviceError> {
@@ -1456,9 +1469,10 @@ unsafe impl Sync for AccelerationStructure {}
 /// Keeps every acceleration structure of a device resident for its command buffers.
 ///
 /// Instances name their bottom-level structures by ID, so Metal cannot see that a command buffer
-/// reads them. A structure joins this set when it is created and leaves it when it is destroyed,
-/// and every command buffer of a device with ray queries uses the set. Changes are committed when a
-/// command buffer finishes encoding, before it can be submitted.
+/// reads them. A structure joins this set when it is created and leaves it when it is destroyed.
+/// The set is attached once to each queue that a device with ray queries encodes for, which covers
+/// all of the queue's command buffers. Changes are committed when a command buffer finishes
+/// encoding, before it can be submitted.
 #[derive(Debug)]
 struct AccelerationStructureResidency {
     set: Retained<ProtocolObject<dyn MTLResidencySet>>,
@@ -1495,13 +1509,11 @@ impl AccelerationStructureResidency {
         *uncommitted = true;
     }
 
-    /// Commits pending changes and makes `command_buffer` use the set.
-    fn use_in(&self, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+    fn commit_pending(&self) {
         let mut uncommitted = self.uncommitted.lock();
         if core::mem::take(&mut *uncommitted) {
             self.set.commit();
         }
-        command_buffer.useResidencySet(&self.set);
     }
 }
 
