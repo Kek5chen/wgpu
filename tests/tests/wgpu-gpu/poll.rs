@@ -14,6 +14,7 @@ use wgpu_test::{
 pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
     vec.extend([
         WAIT,
+        WAIT_ON_EMPTY_ENCODER,
         WAIT_INDEFINITELY_LONG_RUNNING,
         WAIT_WITH_TIMEOUT,
         WAIT_WITH_TIMEOUT_MAX,
@@ -81,6 +82,23 @@ static WAIT: GpuTestConfiguration = GpuTestConfiguration::new()
         ctx.queue.submit(Some(cmd_buf));
         ctx.async_poll(PollType::Wait {
             submission_index: None,
+            timeout: None,
+        })
+        .await
+        .unwrap();
+    });
+
+/// A submission whose encoders record nothing still completes and signals its fence.
+#[gpu_test]
+static WAIT_ON_EMPTY_ENCODER: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(TestParameters::default().enable_noop())
+    .run_async(|ctx| async move {
+        let encoder = ctx
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
+        let index = ctx.queue.submit(Some(encoder.finish()));
+        ctx.async_poll(PollType::Wait {
+            submission_index: Some(index),
             timeout: None,
         })
         .await

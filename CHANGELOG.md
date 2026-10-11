@@ -60,6 +60,8 @@ Bottom level categories:
 
 - Keep acceleration structures resident through one residency set per device, attached once to each queue the device encodes for, instead of building a new set from every TLAS dependency on each submission. `wgpu_hal::CommandEncoder::set_acceleration_structure_dependencies` is removed.
 
+- Create a Metal command buffer only once an encoding records something. The command buffers that wgpu-core opens before every pass for barriers record nothing on Metal, so about half of the command buffers, and the driver storage they take, are no longer created. `wgpu_hal::metal::CommandEncoder::raw_command_buffer` now takes `&mut self` and returns a retained handle.
+
 ## v30.0.0 (2026-07-01)
 
 ### Major changes

@@ -790,8 +790,12 @@ impl crate::Queue for Queue {
                     fence_sync.1.notify_all();
                 });
 
-                let raw = match command_buffers.last() {
-                    Some(&cmd_buf) => cmd_buf.raw.clone(),
+                let last_recorded = command_buffers
+                    .iter()
+                    .rev()
+                    .find_map(|cmd_buf| cmd_buf.raw.as_ref());
+                let raw = match last_recorded {
+                    Some(raw) => raw.clone(),
                     None => {
                         // We do not bother adjusting `command_buffer_created_not_submitted`
                         // because we immediately commit this buffer.
@@ -824,14 +828,17 @@ impl crate::Queue for Queue {
                 }
 
                 // only return an extra one if it's extra
-                match command_buffers.last() {
+                match last_recorded {
                     Some(_) => None,
                     None => Some(raw),
                 }
             };
 
             for cmd_buffer in command_buffers {
-                cmd_buffer.raw.commit();
+                let Some(raw) = &cmd_buffer.raw else {
+                    continue;
+                };
+                raw.commit();
                 // One command buffer per `end_encoding` call moves from the
                 // "created but not yet submitted" bucket into the submitted
                 // set, so update the counter.
@@ -1409,12 +1416,27 @@ struct CommandState {
     pending_timer_queries: Vec<(QuerySet, u32)>,
 }
 
+/// The Metal command buffer of an encoder, created when the first command needs it.
+///
+/// An encoding that records nothing, such as one that only holds barriers (no-ops on Metal),
+/// creates no Metal command buffer at all.
+#[derive(Debug)]
+enum RawCommandBuffer {
+    /// Not encoding.
+    Idle,
+    /// Encoding, with nothing recorded yet.
+    Deferred {
+        label: Option<String>,
+    },
+    Created(Retained<ProtocolObject<dyn MTLCommandBuffer>>),
+}
+
 // Any state in this struct that may be dirty after an abandoned encoding must
 // be reset in `discard_encoding` for possible encoder reuse.
 pub struct CommandEncoder {
     shared: Arc<AdapterShared>,
     queue_shared: Arc<QueueShared>,
-    raw_cmd_buf: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    raw_cmd_buf: RawCommandBuffer,
     // Shared across encoders so Metal resolves dependencies in commit order,
     // including independently recorded command buffers and submissions.
     acceleration_structure_fence: Option<Retained<ProtocolObject<dyn MTLFence>>>,
@@ -1437,7 +1459,8 @@ unsafe impl Sync for CommandEncoder {}
 
 #[derive(Debug)]
 pub struct CommandBuffer {
-    raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    /// `None` when the encoding recorded nothing; submission skips it.
+    raw: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
     queue_shared: Arc<QueueShared>,
 }
 

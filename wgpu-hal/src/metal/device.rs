@@ -790,7 +790,7 @@ impl crate::Device for super::Device {
         Ok(super::CommandEncoder {
             shared: Arc::clone(&self.shared),
             queue_shared: Arc::clone(&desc.queue.shared),
-            raw_cmd_buf: None,
+            raw_cmd_buf: super::RawCommandBuffer::Idle,
             acceleration_structure_fence,
             acceleration_structure_residency: self.acceleration_structure_residency.clone(),
             state: super::CommandState::default(),
